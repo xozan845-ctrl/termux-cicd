@@ -562,6 +562,50 @@ Variables de entorno relevantes:
 
 ## Integración con GitHub
 
+### La única conexión es `owner/repo`
+
+El job de Jenkins **no conoce tu directorio local**, ni tu rama de trabajo, ni
+tus cambios sin subir. Solo se configura con:
+
+- `owner` y `repo` (por ejemplo `xozan845-ctrl/termux-cicd`).
+- Una credencial de GitHub, si el repo es privado.
+- La ruta del `Jenkinsfile` dentro del repo (`Jenkinsfile`).
+- El intervalo de polling.
+
+```
+   Tu proyecto local                GitHub                    Jenkins
+ ┌──────────────────┐          ┌──────────────┐          ┌──────────────────┐
+ │ git working tree │──push───>│  repositorio │<──clone──│  workspace/...   │
+ └──────────────────┘          └──────────────┘   poll   └──────────────────┘
+          │                           ▲
+          │ solo al configurar        │
+          └── termux-cicd ────────────┘
+              lee origin, detecta stack,
+              genera Jenkinsfile, configura job
+```
+
+El directorio local se usa **solo** cuando ejecutas `github add` o `setup`,
+para cuatro cosas:
+
+1. Leer `git remote get-url origin` y deducir `owner/repo`.
+2. Detectar el stack (`Cargo.toml`, `package.json`, etc.).
+3. Generar el `Jenkinsfile` si falta.
+4. Con `--push`, hacer commit y push de ese `Jenkinsfile`.
+
+A partir de ahí, Jenkins clona **desde GitHub** en
+`~/jenkins/home/workspace/<job>_<rama>` y compila esa copia. Consecuencias:
+
+- Los cambios locales sin `git push` **no existen** para Jenkins.
+- Puedes borrar el proyecto local y el job sigue funcionando.
+- Si renombras o mueves el repo en GitHub, el job deja de encontrarlo hasta
+  que lo actualices.
+- Jenkins usa su propia credencial, no tu configuración local de Git ni tu
+  sesión de `gh`.
+- `--dir` solo afecta a la detección y generación del `Jenkinsfile`; no es una
+  ruta de build.
+- Aunque el remoto sea SSH (`git@github.com:...`), Jenkins usa la API y el
+  clon HTTPS de GitHub a partir de `owner/repo`.
+
 ### 1. Deducción del repositorio
 
 Si no pasas `repo`, el CLI ejecuta:
@@ -1100,6 +1144,8 @@ Los backups y `JENKINS_HOME` son los que más ocupan. Revisa también
 - **Sin webhooks.** Requiere IP pública o un túnel; el diseño usa polling.
 - **Sin TLS.** No hay HTTPS integrado; usa Tailscale o un proxy delante.
 - **Sin multi-nodo.** Es un servidor Jenkins de un solo nodo Android.
+- **Jenkins clona desde GitHub, no desde tu disco.** El job solo conoce
+  `owner/repo`; el directorio local se usa para configurar, no para compilar.
 - **Sin sandbox de builds.** Los pipelines ejecutan comandos como tu usuario
   de Termux, con acceso a `$HOME`.
 - **Sin gestor de toolchains.** No instala Node, Python, Go, etc.; solo

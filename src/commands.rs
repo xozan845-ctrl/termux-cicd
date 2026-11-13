@@ -576,6 +576,9 @@ fn github_add(
         );
     }
     println!("  Requiere un Jenkinsfile en el repositorio.");
+    println!(
+        "  Jenkins clonará desde https://github.com/{owner}/{repo_name}; los cambios locales deben subirse con git push."
+    );
     Ok(())
 }
 
