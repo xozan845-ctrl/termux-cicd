@@ -1,4 +1,4 @@
-use crate::cli::ConfigAction;
+use crate::cli::{ConfigAction, GithubAction};
 use crate::config::{self, Config};
 use crate::jenkins::{self, PLUGINS};
 use crate::service;
@@ -9,6 +9,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
+
+const GITHUB_JOB_TEMPLATE: &str = include_str!("../templates/github-job.groovy");
+const GITHUB_LIST_TEMPLATE: &str = include_str!("../templates/github-list.groovy");
 
 pub fn install(cfg: &mut Config, version: Option<String>, force_plugins: bool) -> Result<()> {
     println!("termux-cicd: instalación de Jenkins\n");
@@ -396,6 +399,186 @@ pub fn config(cfg: &mut Config, action: ConfigAction) -> Result<()> {
     }
 }
 
+pub fn github(cfg: &Config, action: GithubAction) -> Result<()> {
+    match action {
+        GithubAction::List => github_list(cfg),
+        GithubAction::Add {
+            repo,
+            name,
+            credentials_id,
+            user,
+            token,
+            token_file,
+            poll_minutes,
+            no_scan,
+        } => github_add(
+            cfg,
+            &repo,
+            name,
+            credentials_id,
+            &user,
+            token,
+            token_file,
+            poll_minutes,
+            !no_scan,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn github_add(
+    cfg: &Config,
+    repo: &str,
+    name: Option<String>,
+    credentials_id: Option<String>,
+    user: &str,
+    token: Option<String>,
+    token_file: Option<PathBuf>,
+    poll_minutes: u32,
+    scan: bool,
+) -> Result<()> {
+    ensure_installed(cfg)?;
+    if !service::status().running {
+        bail!("Jenkins no está en ejecución. Arranca con: termux-cicd start");
+    }
+
+    let (owner, repo_name) = parse_github_repo(repo)?;
+    let job_name = name.unwrap_or_else(|| repo_name.clone());
+    if job_name.trim().is_empty() {
+        bail!("el nombre del job no puede estar vacío");
+    }
+
+    let token = resolve_token(token, token_file)?;
+    let credential_id = match (credentials_id, token.is_some()) {
+        (Some(id), _) => id,
+        (None, true) => "github-pat".to_string(),
+        (None, false) => String::new(),
+    };
+
+    let trigger = if poll_minutes == 0 {
+        String::new()
+    } else if (1..=60).contains(&poll_minutes) {
+        format!("{poll_minutes}m")
+    } else {
+        bail!("poll_minutes debe estar entre 0 y 60");
+    };
+
+    println!("Configurando GitHub en Jenkins");
+    println!("  Repositorio: {owner}/{repo_name}");
+    println!("  Job:         {job_name}");
+    if credential_id.is_empty() {
+        println!("  Credencial:  ninguna (solo funciona con repositorios públicos)");
+    } else if token.is_some() {
+        println!("  Credencial:  {credential_id} (token nuevo o actualizado)");
+    } else {
+        println!("  Credencial:  {credential_id} (existente)");
+    }
+    println!(
+        "  Escaneo:     {}",
+        if trigger.is_empty() {
+            "desactivado".to_string()
+        } else {
+            format!("cada {poll_minutes} min")
+        }
+    );
+
+    let script = GITHUB_JOB_TEMPLATE
+        .replace("{{JOB_NAME}}", &jenkins::groovy_escape(&job_name))
+        .replace("{{OWNER}}", &jenkins::groovy_escape(&owner))
+        .replace("{{REPO}}", &jenkins::groovy_escape(&repo_name))
+        .replace("{{CREDENTIALS_ID}}", &jenkins::groovy_escape(&credential_id))
+        .replace("{{USER}}", &jenkins::groovy_escape(user))
+        .replace("{{TOKEN}}", &jenkins::groovy_escape(token.as_deref().unwrap_or("")))
+        .replace("{{TRIGGER}}", &jenkins::groovy_escape(&trigger))
+        .replace("{{SCAN}}", if scan { "true" } else { "false" });
+
+    println!("  Aplicando configuración...");
+    jenkins::run_groovy(cfg, &script)?;
+
+    println!("\nJob listo: {job_name}");
+    if scan {
+        println!("  Escaneo inicial solicitado; aparecerá en unos segundos.");
+        println!("  Consulta el resultado con: termux-cicd github list");
+    }
+    println!("  Requiere un Jenkinsfile en el repositorio.");
+    Ok(())
+}
+
+fn github_list(cfg: &Config) -> Result<()> {
+    ensure_installed(cfg)?;
+    if !service::status().running {
+        bail!("Jenkins no está en ejecución. Arranca con: termux-cicd start");
+    }
+    jenkins::run_groovy(cfg, GITHUB_LIST_TEMPLATE)
+}
+
+/// Acepta `https://github.com/owner/repo`, `git@github.com:owner/repo.git`
+/// y la forma corta `owner/repo`.
+pub fn parse_github_repo(input: &str) -> Result<(String, String)> {
+    let mut text = input.trim();
+    if text.is_empty() {
+        bail!("no has indicado ningún repositorio");
+    }
+
+    if let Some(rest) = text.strip_prefix("git@github.com:") {
+        text = rest;
+    } else if let Some(rest) = text
+        .strip_prefix("https://github.com/")
+        .or_else(|| text.strip_prefix("http://github.com/"))
+    {
+        text = rest;
+    } else if text.starts_with("https://") || text.starts_with("http://") || text.starts_with("git@")
+    {
+        bail!("solo se admiten repositorios de github.com: {input}");
+    }
+
+    let text = text.trim_end_matches('/');
+    let text = text.strip_suffix(".git").unwrap_or(text);
+    let mut parts = text.split('/');
+    let owner = parts.next().unwrap_or("").trim();
+    let repo = parts.next().unwrap_or("").trim();
+    if parts.next().is_some() {
+        bail!("formato de repositorio no válido: {input} (usa owner/repo)");
+    }
+
+    let valid = |value: &str| {
+        !value.is_empty()
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    if !valid(owner) || !valid(repo) {
+        bail!("formato de repositorio no válido: {input} (usa owner/repo)");
+    }
+    Ok((owner.to_string(), repo.to_string()))
+}
+
+fn resolve_token(token: Option<String>, token_file: Option<PathBuf>) -> Result<Option<String>> {
+    if let Some(path) = token_file {
+        let path = util::expand_home(&path);
+        let value = fs::read_to_string(&path)
+            .with_context(|| format!("no se pudo leer el token de {}", path.display()))?;
+        let value = value.trim().to_string();
+        if value.is_empty() {
+            bail!("el archivo {} está vacío", path.display());
+        }
+        return Ok(Some(value));
+    }
+    if let Some(value) = token {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return Ok(Some(value));
+        }
+    }
+    if let Ok(value) = std::env::var("GITHUB_TOKEN") {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
 fn ensure_installed(cfg: &Config) -> Result<()> {
     if !cfg.paths().war().exists() {
         bail!(
@@ -451,4 +634,50 @@ fn print_summary(cfg: &Config, url: &str, password: &str, ready: bool) {
     println!(
         "Arranque al encender: instala Termux:Boot y quita la optimización de batería a Termux."
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acepta_url_https() {
+        assert_eq!(
+            parse_github_repo("https://github.com/owner/repo").unwrap(),
+            ("owner".into(), "repo".into())
+        );
+        assert_eq!(
+            parse_github_repo("https://github.com/owner/repo.git").unwrap(),
+            ("owner".into(), "repo".into())
+        );
+        assert_eq!(
+            parse_github_repo("https://github.com/owner/repo/").unwrap(),
+            ("owner".into(), "repo".into())
+        );
+    }
+
+    #[test]
+    fn acepta_ssh_y_forma_corta() {
+        assert_eq!(
+            parse_github_repo("git@github.com:owner/repo.git").unwrap(),
+            ("owner".into(), "repo".into())
+        );
+        assert_eq!(
+            parse_github_repo("owner/repo").unwrap(),
+            ("owner".into(), "repo".into())
+        );
+        assert_eq!(
+            parse_github_repo("  owner/repo  ").unwrap(),
+            ("owner".into(), "repo".into())
+        );
+    }
+
+    #[test]
+    fn rechaza_formatos_invalidos() {
+        assert!(parse_github_repo("").is_err());
+        assert!(parse_github_repo("repo").is_err());
+        assert!(parse_github_repo("https://gitlab.com/owner/repo").is_err());
+        assert!(parse_github_repo("owner/repo/extra").is_err());
+        assert!(parse_github_repo("owner/re po").is_err());
+    }
 }

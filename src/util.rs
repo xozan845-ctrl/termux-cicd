@@ -1,10 +1,10 @@
 use anyhow::{bail, Context, Result};
 use std::env;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 pub fn home() -> PathBuf {
     env::var_os("HOME")
@@ -87,6 +87,32 @@ pub fn run_tolerant(program: &str, args: &[&str], allowed_codes: &[i32]) -> Resu
         return Ok(());
     }
     bail!("`{program} {}` falló (código {code}): {err}", args.join(" "));
+}
+
+/// Ejecuta un comando pasando `input` por stdin.
+pub fn run_with_stdin(program: &str, args: &[&str], input: &str) -> Result<()> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("no se pudo ejecutar {program}"))?;
+
+    child
+        .stdin
+        .take()
+        .context("no se pudo abrir la entrada del proceso")?
+        .write_all(input.as_bytes())?;
+
+    let out = child
+        .wait_with_output()
+        .with_context(|| format!("falló la ejecución de {program}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        bail!("`{program} {}` falló: {}", args.join(" "), err.trim());
+    }
+    Ok(())
 }
 
 pub fn download(url: &str, dest: &Path) -> Result<()> {

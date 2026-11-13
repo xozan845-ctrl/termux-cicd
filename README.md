@@ -17,6 +17,7 @@ credenciales y dejarlo arrancando solo al encender. Todo eso ahora es un comando
 - Genera un usuario `admin` con contraseña aleatoria.
 - Crea el servicio `runit` (`sv`) y el script de arranque para **Termux:Boot**.
 - Arranca Jenkins, espera a que autentique y muestra la URL.
+- Configura repositorios de GitHub: credencial, Multibranch Pipeline y polling.
 - Gestiona el ciclo de vida: estado, logs, actualización, backup/restore y
   desinstalación.
 
@@ -71,6 +72,10 @@ termux-cicd config set port 8081
 termux-cicd config set heap_mb 1500
 termux-cicd config set executors 2
 termux-cicd config set url http://mi-movil.tailnet.ts.net:8080/
+
+# GitHub
+termux-cicd github add usuario/repo
+termux-cicd github list
 ```
 
 Opciones globales: `--root DIR` (por defecto `~/jenkins`) y `--port PUERTO`.
@@ -103,6 +108,44 @@ Si Jenkins se cae, `runit` lo reinicia.
 
 ## Conectar un proyecto de GitHub
 
+### Automático (recomendado)
+
+```sh
+# Repositorio público, sin credenciales
+termux-cicd github add https://github.com/usuario/repo
+
+# Repositorio privado: el token se lee del entorno (no aparece en `ps`)
+export GITHUB_TOKEN=ghp_xxxxxxxx
+termux-cicd github add usuario/repo
+
+# O desde un archivo con permisos 0600
+termux-cicd github add usuario/repo --token-file ~/.config/github-token
+
+# Opciones útiles
+termux-cicd github add usuario/repo --name mi-proyecto --poll-minutes 10
+termux-cicd github add usuario/repo --credentials-id mi-pat-existente --no-scan
+termux-cicd github list
+```
+
+Formatos de repositorio admitidos: `https://github.com/usuario/repo`,
+`git@github.com:usuario/repo.git` y `usuario/repo`.
+
+El comando:
+
+1. Crea (o actualiza) la credencial `github-pat` de tipo *Username with
+   password* con el token como contraseña.
+2. Crea un **Multibranch Pipeline** con GitHub Branch Source.
+3. Descubre todas las ramas y PRs.
+4. Programa el escaneo periódico (`5m` por defecto, `0` lo desactiva).
+5. Lanza el escaneo inicial salvo que uses `--no-scan`.
+
+Necesita un `Jenkinsfile` en la rama. Si no existe, el escaneo termina bien
+pero no crea ninguna rama compilable (así lo indica el log de indexación).
+
+### Manual
+
+También puedes hacerlo desde la interfaz:
+
 1. En Jenkins: **New Item → Multibranch Pipeline**.
 2. Branch Source → GitHub → tu usuario/repo.
 3. Si es privado, crea una credencial *Username with password* usando tu
@@ -114,6 +157,17 @@ Si Jenkins se cae, `runit` lo reinicia.
 Sin IP pública no hay webhooks: el **polling** cada 5 minutos es la opción
 estable. Para builds instantáneos haría falta exponer Jenkins (Cloudflare
 Tunnel, ngrok...), que no es el objetivo de esta versión.
+
+## Seguridad del token
+
+- `--token` funciona, pero queda visible en el historial del shell y en `ps`.
+  Prefiere `GITHUB_TOKEN` o `--token-file`.
+- El token se envía a Jenkins por la entrada estándar de su CLI, nunca como
+  argumento de proceso.
+- La contraseña de Jenkins se pasa en un archivo temporal `0600` que se borra
+  al terminar.
+- Usa un PAT con el mínimo permiso necesario (`repo` para repos privados,
+  `public_repo` para públicos).
 
 ## Acceso remoto
 
@@ -133,7 +187,7 @@ binarios de Termux, que no corren sobre bionic). Actívala y abre
 
 ## Roadmap
 
-- [ ] Comando `github` para crear credenciales y el Multibranch Pipeline vía API.
+- [x] Comando `github` para crear credenciales y el Multibranch Pipeline vía API.
 - [ ] Perfiles de plugins por stack (Node, Python, Rust, Go...).
 - [ ] `doctor --fix`.
 - [ ] Instalación de toolchains de build (`nodejs`, `python`, `golang`).

@@ -74,11 +74,48 @@ pub enum Command {
         #[arg(long)]
         purge: bool,
     },
+    /// Configura repositorios de GitHub en Jenkins
+    Github {
+        #[command(subcommand)]
+        action: GithubAction,
+    },
     /// Muestra o cambia la configuración
     Config {
         #[command(subcommand)]
         action: ConfigAction,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GithubAction {
+    /// Crea o actualiza credenciales y un Multibranch Pipeline
+    Add {
+        /// URL del repositorio o formato owner/repo
+        repo: String,
+        /// Nombre del job (por defecto, el nombre del repositorio)
+        #[arg(long)]
+        name: Option<String>,
+        /// ID de una credencial existente (por defecto github-pat si hay token)
+        #[arg(long, value_name = "ID")]
+        credentials_id: Option<String>,
+        /// Usuario de GitHub para la credencial
+        #[arg(long, default_value = "x-access-token")]
+        user: String,
+        /// Token de GitHub (mejor usa GITHUB_TOKEN o --token-file)
+        #[arg(long, env = "GITHUB_TOKEN")]
+        token: Option<String>,
+        /// Archivo que contiene el token
+        #[arg(long, value_name = "ARCHIVO")]
+        token_file: Option<PathBuf>,
+        /// Minutos entre escaneos (0 = desactivado)
+        #[arg(long, default_value_t = 5)]
+        poll_minutes: u32,
+        /// No lanzar el escaneo inicial
+        #[arg(long)]
+        no_scan: bool,
+    },
+    /// Lista los Multibranch Pipeline configurados
+    List,
 }
 
 #[derive(Debug, Subcommand)]

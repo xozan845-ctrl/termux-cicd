@@ -3,6 +3,7 @@ use crate::util;
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::net::{SocketAddr, TcpStream};
+use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -144,7 +145,7 @@ pub fn write_init_script(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-fn groovy_escape(value: &str) -> String {
+pub fn groovy_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
@@ -226,4 +227,60 @@ pub fn wait_http(port: u16, timeout: Duration) -> Result<bool> {
         }
         sleep(Duration::from_secs(2));
     }
+}
+
+/// URL base con la que Jenkins se identifica (la misma de `url.txt`).
+/// El CLI de Jenkins rechaza peticiones si el origen no coincide exactamente.
+pub fn base_url(cfg: &Config) -> Result<String> {
+    let file = cfg.paths().url_file();
+    let url = if file.exists() {
+        fs::read_to_string(&file)
+            .with_context(|| format!("no se pudo leer {}", file.display()))?
+            .trim()
+            .to_string()
+    } else {
+        let ip = crate::termux::lan_ip().unwrap_or_else(|| "127.0.0.1".to_string());
+        format!("http://{ip}:{}/", cfg.port)
+    };
+    Ok(url.trim_end_matches('/').to_string())
+}
+
+/// Descarga el cliente `jenkins-cli.jar` si todavía no existe.
+pub fn ensure_cli_jar(cfg: &Config) -> Result<PathBuf> {
+    let p = cfg.paths();
+    let jar = p.cli_jar();
+    if jar.exists() {
+        return Ok(jar);
+    }
+    let url = format!("{}/jnlpJars/jenkins-cli.jar", base_url(cfg)?);
+    println!("  Descargando jenkins-cli.jar...");
+    util::download(&url, &jar)?;
+    Ok(jar)
+}
+
+/// Ejecuta un script Groovy en el servidor mediante el CLI de Jenkins.
+/// La contraseña va en un archivo temporal `0600` para no exponerla en `ps`.
+pub fn run_groovy(cfg: &Config, script: &str) -> Result<()> {
+    let p = cfg.paths();
+    let jar = ensure_cli_jar(cfg)?;
+    let password = fs::read_to_string(p.password())
+        .with_context(|| format!("no se pudo leer {}", p.password().display()))?
+        .trim()
+        .to_string();
+    if password.is_empty() {
+        bail!("la contraseña de admin está vacía en {}", p.password().display());
+    }
+
+    let auth_file = p.root.join(".cli-auth.tmp");
+    util::write_private(&auth_file, &format!("admin:{password}\n"))?;
+
+    let url = base_url(cfg)?;
+    let auth_arg = format!("@{}", auth_file.to_string_lossy());
+    let result = util::run_with_stdin(
+        "java",
+        &["-jar", &jar.to_string_lossy(), "-s", &url, "-auth", &auth_arg, "groovy", "="],
+        script,
+    );
+    let _ = fs::remove_file(&auth_file);
+    result
 }

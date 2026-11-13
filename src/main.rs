@@ -55,6 +55,7 @@ fn run() -> anyhow::Result<()> {
         Command::Backup { output } => commands::backup(&cfg, output),
         Command::Restore { file } => commands::restore(&cfg, file),
         Command::Uninstall { purge } => commands::uninstall(&cfg, purge),
+        Command::Github { action } => commands::github(&cfg, action),
         Command::Config { action } => commands::config(&mut cfg, action),
     }
 }

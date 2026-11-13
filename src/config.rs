@@ -116,6 +116,10 @@ impl Paths {
         self.root.join("jenkins-plugin-manager.jar")
     }
 
+    pub fn cli_jar(&self) -> PathBuf {
+        self.root.join("jenkins-cli.jar")
+    }
+
     pub fn plugins_txt(&self) -> PathBuf {
         self.root.join("plugins.txt")
     }
