@@ -1,0 +1,20 @@
+pipeline {
+    agent any
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+    stages {
+        stage('Inspeccionar') {
+            steps {
+                sh 'echo "Proyecto sin stack reconocido"; ls -la'
+            }
+        }
+    }
+    post {
+        always {
+            cleanWs()
+        }
+    }
+}

@@ -1,0 +1,28 @@
+pipeline {
+    agent any
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+    stages {
+        stage('Preparar entorno') {
+            steps {
+                sh 'python -m venv .venv'
+                sh '. .venv/bin/activate && python -m pip install --upgrade pip'
+                sh 'if [ -f requirements.txt ]; then . .venv/bin/activate && pip install -r requirements.txt; fi'
+                sh 'if [ -f pyproject.toml ]; then . .venv/bin/activate && pip install -e .; fi'
+            }
+        }
+        stage('Probar') {
+            steps {
+                sh '. .venv/bin/activate && (python -m pytest -q || python -m unittest discover -v)'
+            }
+        }
+    }
+    post {
+        always {
+            cleanWs()
+        }
+    }
+}

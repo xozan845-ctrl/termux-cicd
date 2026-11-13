@@ -1,0 +1,20 @@
+pipeline {
+    agent any
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+    stages {
+        stage('Compilar y probar') {
+            steps {
+                sh 'if [ -x ./gradlew ]; then ./gradlew build; else gradle build; fi'
+            }
+        }
+    }
+    post {
+        always {
+            cleanWs()
+        }
+    }
+}

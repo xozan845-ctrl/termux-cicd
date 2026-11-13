@@ -40,6 +40,24 @@ install -m755 target/release/termux-cicd "$PREFIX/bin/termux-cicd"
 
 ## Uso
 
+### La vía corta: un solo comando
+
+Dentro de tu proyecto (con `git remote origin` apuntando a GitHub):
+
+```sh
+termux-cicd setup
+```
+
+Eso instala Jenkins si aún no existe, crea la credencial (si encuentra un
+token), configura el Multibranch Pipeline, programa el polling y genera un
+`Jenkinsfile` para tu stack si falta. No hay que pasar ni el repo ni el token.
+
+```sh
+termux-cicd setup --push    # además hace commit y push del Jenkinsfile
+```
+
+### Comandos completos
+
 ```sh
 # Instalación completa (idempotente; se puede repetir para reparar)
 termux-cicd install
@@ -110,18 +128,19 @@ Si Jenkins se cae, `runit` lo reinicia.
 
 ### Automático (recomendado)
 
+Lo normal es no tener que escribir nada:
+
 ```sh
-# Repositorio público, sin credenciales
+cd mi-proyecto
+termux-cicd setup          # instala + credencial + job + Jenkinsfile
+termux-cicd github add     # solo la parte de GitHub
+```
+
+`repo` es opcional: se deduce de `git remote get-url origin`. También puedes
+pasarlo explícitamente:
+
+```sh
 termux-cicd github add https://github.com/usuario/repo
-
-# Repositorio privado: el token se lee del entorno (no aparece en `ps`)
-export GITHUB_TOKEN=ghp_xxxxxxxx
-termux-cicd github add usuario/repo
-
-# O desde un archivo con permisos 0600
-termux-cicd github add usuario/repo --token-file ~/.config/github-token
-
-# Opciones útiles
 termux-cicd github add usuario/repo --name mi-proyecto --poll-minutes 10
 termux-cicd github add usuario/repo --credentials-id mi-pat-existente --no-scan
 termux-cicd github list
@@ -130,14 +149,45 @@ termux-cicd github list
 Formatos de repositorio admitidos: `https://github.com/usuario/repo`,
 `git@github.com:usuario/repo.git` y `usuario/repo`.
 
+**Token automático.** Si no pasas `--token`, el CLI busca en este orden:
+
+1. `GITHUB_TOKEN`
+2. `GH_TOKEN`
+3. `~/.config/termux-cicd/github-token`
+4. `~/.config/github-token`
+5. `~/.github-token`
+6. `~/.config/gh/hosts.yml` (si usas GitHub CLI)
+7. `gh auth token`
+
+Si no encuentra ninguno, configura el job para acceso anónimo: válido para
+repositorios públicos. Para privados, exporta `GITHUB_TOKEN` una vez.
+
+**Jenkinsfile automático.** Si el proyecto local no tiene `Jenkinsfile`, se
+genera uno según el stack detectado:
+
+| Archivo detectado | Stack | Pipeline |
+|---|---|---|
+| `Cargo.toml` | Rust | `cargo build --release` + `cargo test` |
+| `package.json` | Node.js | `npm ci`/`install` + `test` + `build` |
+| `pyproject.toml`, `requirements.txt`, `setup.py` | Python | venv + pytest/unittest |
+| `pom.xml` | Maven | `./mvnw` o `mvn verify` |
+| `build.gradle(.kts)` | Gradle | `./gradlew` o `gradle build` |
+| `go.mod` | Go | `go test` + `go build` |
+| ninguno | genérico | inspección del repo |
+
+Usa `--no-jenkinsfile` para no generarlo y `--push` para hacer commit y push
+del archivo generado automáticamente.
+
 El comando:
 
-1. Crea (o actualiza) la credencial `github-pat` de tipo *Username with
+1. Deduce `owner/repo` del remoto `origin` si no lo indicas.
+2. Crea (o actualiza) la credencial `github-pat` de tipo *Username with
    password* con el token como contraseña.
-2. Crea un **Multibranch Pipeline** con GitHub Branch Source.
-3. Descubre todas las ramas y PRs.
-4. Programa el escaneo periódico (`5m` por defecto, `0` lo desactiva).
-5. Lanza el escaneo inicial salvo que uses `--no-scan`.
+3. Crea un **Multibranch Pipeline** con GitHub Branch Source.
+4. Descubre todas las ramas y PRs.
+5. Programa el escaneo periódico (`5m` por defecto, `0` lo desactiva).
+6. Genera el `Jenkinsfile` si falta.
+7. Lanza el escaneo inicial salvo que uses `--no-scan`.
 
 Necesita un `Jenkinsfile` en la rama. Si no existe, el escaneo termina bien
 pero no crea ninguna rama compilable (así lo indica el log de indexación).

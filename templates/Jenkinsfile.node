@@ -1,0 +1,30 @@
+pipeline {
+    agent any
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+    stages {
+        stage('Instalar') {
+            steps {
+                sh 'if [ -f package-lock.json ]; then npm ci; else npm install; fi'
+            }
+        }
+        stage('Probar') {
+            steps {
+                sh 'npm test --if-present'
+            }
+        }
+        stage('Compilar') {
+            steps {
+                sh 'npm run build --if-present'
+            }
+        }
+    }
+    post {
+        always {
+            cleanWs()
+        }
+    }
+}

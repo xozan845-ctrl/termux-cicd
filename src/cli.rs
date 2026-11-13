@@ -79,6 +79,29 @@ pub enum Command {
         #[command(subcommand)]
         action: GithubAction,
     },
+    /// Instala Jenkins (si hace falta) y conecta el proyecto actual a GitHub
+    Setup {
+        /// URL del repositorio o formato owner/repo (por defecto, el remoto origin)
+        repo: Option<String>,
+        /// Directorio del proyecto (por defecto, el actual)
+        #[arg(long, value_name = "DIR", default_value = ".")]
+        dir: PathBuf,
+        /// Nombre del job (por defecto, el nombre del repositorio)
+        #[arg(long)]
+        name: Option<String>,
+        /// Token de GitHub (mejor usa GITHUB_TOKEN o --token-file)
+        #[arg(long, env = "GITHUB_TOKEN")]
+        token: Option<String>,
+        /// Archivo que contiene el token
+        #[arg(long, value_name = "ARCHIVO")]
+        token_file: Option<PathBuf>,
+        /// Minutos entre escaneos (0 = desactivado)
+        #[arg(long, default_value_t = 5)]
+        poll_minutes: u32,
+        /// Hacer commit y push del Jenkinsfile generado
+        #[arg(long)]
+        push: bool,
+    },
     /// Muestra o cambia la configuración
     Config {
         #[command(subcommand)]
@@ -90,8 +113,11 @@ pub enum Command {
 pub enum GithubAction {
     /// Crea o actualiza credenciales y un Multibranch Pipeline
     Add {
-        /// URL del repositorio o formato owner/repo
-        repo: String,
+        /// URL del repositorio o formato owner/repo (por defecto, el remoto origin)
+        repo: Option<String>,
+        /// Directorio del proyecto (por defecto, el actual)
+        #[arg(long, value_name = "DIR", default_value = ".")]
+        dir: PathBuf,
         /// Nombre del job (por defecto, el nombre del repositorio)
         #[arg(long)]
         name: Option<String>,
@@ -113,6 +139,12 @@ pub enum GithubAction {
         /// No lanzar el escaneo inicial
         #[arg(long)]
         no_scan: bool,
+        /// No generar un Jenkinsfile si el proyecto no tiene uno
+        #[arg(long)]
+        no_jenkinsfile: bool,
+        /// Hacer commit y push del Jenkinsfile generado
+        #[arg(long)]
+        push: bool,
     },
     /// Lista los Multibranch Pipeline configurados
     List,

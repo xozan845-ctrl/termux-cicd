@@ -13,6 +13,14 @@ use std::time::Duration;
 const GITHUB_JOB_TEMPLATE: &str = include_str!("../templates/github-job.groovy");
 const GITHUB_LIST_TEMPLATE: &str = include_str!("../templates/github-list.groovy");
 
+const JENKINSFILE_RUST: &str = include_str!("../templates/Jenkinsfile.rust");
+const JENKINSFILE_NODE: &str = include_str!("../templates/Jenkinsfile.node");
+const JENKINSFILE_PYTHON: &str = include_str!("../templates/Jenkinsfile.python");
+const JENKINSFILE_MAVEN: &str = include_str!("../templates/Jenkinsfile.maven");
+const JENKINSFILE_GRADLE: &str = include_str!("../templates/Jenkinsfile.gradle");
+const JENKINSFILE_GO: &str = include_str!("../templates/Jenkinsfile.go");
+const JENKINSFILE_GENERIC: &str = include_str!("../templates/Jenkinsfile.generic");
+
 pub fn install(cfg: &mut Config, version: Option<String>, force_plugins: bool) -> Result<()> {
     println!("termux-cicd: instalación de Jenkins\n");
 
@@ -399,11 +407,50 @@ pub fn config(cfg: &mut Config, action: ConfigAction) -> Result<()> {
     }
 }
 
-pub fn github(cfg: &Config, action: GithubAction) -> Result<()> {
-    match action {
+/// Instala Jenkins si hace falta y conecta el proyecto actual en un solo paso.
+#[allow(clippy::too_many_arguments)]
+pub fn setup(
+    cfg: &mut Config,
+    repo: Option<String>,
+    dir: PathBuf,
+    name: Option<String>,
+    token: Option<String>,
+    token_file: Option<PathBuf>,
+    poll_minutes: u32,
+    push: bool,
+) -> Result<()> {
+    if !cfg.paths().war().exists() {
+        println!("Jenkins no está instalado todavía; instalando...\n");
+        install(cfg, None, false)?;
+        println!();
+    } else if !service::status().running {
+        start(cfg)?;
+        println!();
+    }
+
+    github(
+        cfg,
+        GithubAction::Add {
+            repo,
+            dir,
+            name,
+            credentials_id: None,
+            user: "x-access-token".to_string(),
+            token,
+            token_file,
+            poll_minutes,
+            no_scan: false,
+            no_jenkinsfile: false,
+            push,
+        },
+    )
+}
+
+pub fn github(cfg: &Config, action: GithubAction) -> Result<()> {    match action {
         GithubAction::List => github_list(cfg),
         GithubAction::Add {
             repo,
+            dir,
             name,
             credentials_id,
             user,
@@ -411,24 +458,33 @@ pub fn github(cfg: &Config, action: GithubAction) -> Result<()> {
             token_file,
             poll_minutes,
             no_scan,
-        } => github_add(
-            cfg,
-            &repo,
-            name,
-            credentials_id,
-            &user,
-            token,
-            token_file,
-            poll_minutes,
-            !no_scan,
-        ),
+            no_jenkinsfile,
+            push,
+        } => {
+            let dir = util::expand_home(&dir);
+            github_add(
+                cfg,
+                repo.as_deref(),
+                &dir,
+                name,
+                credentials_id,
+                &user,
+                token,
+                token_file,
+                poll_minutes,
+                !no_scan,
+                !no_jenkinsfile,
+                push,
+            )
+        }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn github_add(
     cfg: &Config,
-    repo: &str,
+    repo: Option<&str>,
+    dir: &std::path::Path,
     name: Option<String>,
     credentials_id: Option<String>,
     user: &str,
@@ -436,13 +492,17 @@ fn github_add(
     token_file: Option<PathBuf>,
     poll_minutes: u32,
     scan: bool,
+    make_jenkinsfile: bool,
+    push: bool,
 ) -> Result<()> {
     ensure_installed(cfg)?;
     if !service::status().running {
         bail!("Jenkins no está en ejecución. Arranca con: termux-cicd start");
     }
 
-    let (owner, repo_name) = parse_github_repo(repo)?;
+    let project = detect_project(dir, repo)?;
+    let owner = project.owner.clone();
+    let repo_name = project.name.clone();
     let job_name = name.unwrap_or_else(|| repo_name.clone());
     if job_name.trim().is_empty() {
         bail!("el nombre del job no puede estar vacío");
@@ -465,6 +525,9 @@ fn github_add(
 
     println!("Configurando GitHub en Jenkins");
     println!("  Repositorio: {owner}/{repo_name}");
+    if let Some(root) = &project.root {
+        println!("  Proyecto:    {}", root.display());
+    }
     println!("  Job:         {job_name}");
     if credential_id.is_empty() {
         println!("  Credencial:  ninguna (solo funciona con repositorios públicos)");
@@ -481,6 +544,13 @@ fn github_add(
             format!("cada {poll_minutes} min")
         }
     );
+
+    let mut jenkinsfile_created = false;
+    if make_jenkinsfile {
+        if let Some(root) = &project.root {
+            jenkinsfile_created = maybe_write_jenkinsfile(root, push)?;
+        }
+    }
 
     let script = GITHUB_JOB_TEMPLATE
         .replace("{{JOB_NAME}}", &jenkins::groovy_escape(&job_name))
@@ -500,9 +570,15 @@ fn github_add(
         println!("  Escaneo inicial solicitado; aparecerá en unos segundos.");
         println!("  Consulta el resultado con: termux-cicd github list");
     }
+    if jenkinsfile_created && !push {
+        println!(
+            "  Recuerda subir el Jenkinsfile antes del primer build:\n    git add Jenkinsfile && git commit -m \"ci: añadir Jenkinsfile\" && git push"
+        );
+    }
     println!("  Requiere un Jenkinsfile en el repositorio.");
     Ok(())
 }
+
 
 fn github_list(cfg: &Config) -> Result<()> {
     ensure_installed(cfg)?;
@@ -570,13 +646,182 @@ fn resolve_token(token: Option<String>, token_file: Option<PathBuf>) -> Result<O
             return Ok(Some(value));
         }
     }
-    if let Ok(value) = std::env::var("GITHUB_TOKEN") {
-        let value = value.trim().to_string();
-        if !value.is_empty() {
-            return Ok(Some(value));
+
+    // Búsqueda automática: variables de entorno, archivos habituales y `gh`.
+    for var in ["GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(value) = std::env::var(var) {
+            let value = value.trim().to_string();
+            if !value.is_empty() {
+                return Ok(Some(value));
+            }
+        }
+    }
+
+    let candidates = [
+        util::home().join(".config/termux-cicd/github-token"),
+        util::home().join(".config/github-token"),
+        util::home().join(".github-token"),
+    ];
+    for path in candidates {
+        if path.exists() {
+            if let Ok(value) = fs::read_to_string(&path) {
+                let value = value.trim().to_string();
+                if !value.is_empty() {
+                    return Ok(Some(value));
+                }
+            }
+        }
+    }
+
+    if let Some(value) = token_from_gh_hosts() {
+        return Ok(Some(value));
+    }
+    if util::which("gh").is_some() {
+        if let Ok(value) = util::quiet("gh", &["auth", "token"]) {
+            let value = value.trim().to_string();
+            if !value.is_empty() {
+                return Ok(Some(value));
+            }
         }
     }
     Ok(None)
+}
+
+/// Lee `oauth_token` de `~/.config/gh/hosts.yml` sin depender de un parser YAML.
+fn token_from_gh_hosts() -> Option<String> {
+    let path = util::home().join(".config/gh/hosts.yml");
+    let raw = fs::read_to_string(path).ok()?;
+    for line in raw.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("oauth_token:") {
+            let value = rest.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+#[derive(Debug)]
+struct ProjectInfo {
+    owner: String,
+    name: String,
+    root: Option<PathBuf>,
+}
+
+/// Deduce owner/repo del argumento o del remoto `origin` del proyecto actual.
+fn detect_project(dir: &std::path::Path, repo: Option<&str>) -> Result<ProjectInfo> {
+    let dir = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(dir)
+    };
+
+    let root = util::quiet("git", &["-C", &dir.to_string_lossy(), "rev-parse", "--show-toplevel"])
+        .ok()
+        .map(|value| PathBuf::from(value.trim()))
+        .filter(|path| path.is_dir());
+
+    let remote = root.as_ref().and_then(|root| {
+        util::quiet(
+            "git",
+            &["-C", &root.to_string_lossy(), "remote", "get-url", "origin"],
+        )
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    });
+
+    let (owner, name) = match repo {
+        Some(value) => parse_github_repo(value)?,
+        None => match remote.as_deref() {
+            Some(url) => parse_github_repo(url)?,
+            None => bail!(
+                "no he podido deducir el repositorio: {} no es un repo Git con remoto `origin`.\n\
+                 Ejecuta `termux-cicd github add` dentro de tu proyecto, o indica owner/repo.",
+                dir.display()
+            ),
+        },
+    };
+
+    Ok(ProjectInfo { owner, name, root })
+}
+
+/// Genera un Jenkinsfile según el stack si el proyecto todavía no tiene uno.
+/// Devuelve `true` si lo ha creado.
+fn maybe_write_jenkinsfile(root: &std::path::Path, push: bool) -> Result<bool> {
+    let path = root.join("Jenkinsfile");
+    if path.exists() {
+        return Ok(false);
+    }
+
+    let (stack, content) = jenkinsfile_for(root);
+    fs::write(&path, content).with_context(|| format!("no se pudo crear {}", path.display()))?;
+    println!("  Jenkinsfile: {stack} → {}", path.display());
+
+    if push {
+        let root_s = root.to_string_lossy().to_string();
+        println!("  Haciendo commit y push del Jenkinsfile...");
+        util::run("git", &["-C", &root_s, "add", "Jenkinsfile"])?;
+        let commit = util::output(
+            "git",
+            &[
+                "-C",
+                &root_s,
+                "-c",
+                "user.name=termux-cicd",
+                "-c",
+                "user.email=termux-cicd@localhost",
+                "commit",
+                "-m",
+                "ci: añadir Jenkinsfile generado por termux-cicd",
+            ],
+        )?;
+        if !commit.status.success() {
+            let err = String::from_utf8_lossy(&commit.stderr);
+            if !err.contains("nothing to commit") {
+                bail!("no se pudo hacer commit: {}", err.trim());
+            }
+        }
+        let status = std::process::Command::new("git")
+            .args(["-C", &root_s, "push"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .status()
+            .context("no se pudo ejecutar git push")?;
+        if !status.success() {
+            bail!(
+                "el push falló. Revisa tus credenciales de Git o sube el Jenkinsfile manualmente."
+            );
+        }
+        println!("  Jenkinsfile subido al repositorio.");
+    }
+    Ok(true)
+}
+
+fn jenkinsfile_for(root: &std::path::Path) -> (&'static str, &'static str) {
+    if root.join("Cargo.toml").exists() {
+        return ("Rust", JENKINSFILE_RUST);
+    }
+    if root.join("package.json").exists() {
+        return ("Node.js", JENKINSFILE_NODE);
+    }
+    if root.join("pyproject.toml").exists()
+        || root.join("requirements.txt").exists()
+        || root.join("setup.py").exists()
+    {
+        return ("Python", JENKINSFILE_PYTHON);
+    }
+    if root.join("pom.xml").exists() {
+        return ("Maven", JENKINSFILE_MAVEN);
+    }
+    if root.join("build.gradle").exists() || root.join("build.gradle.kts").exists() {
+        return ("Gradle", JENKINSFILE_GRADLE);
+    }
+    if root.join("go.mod").exists() {
+        return ("Go", JENKINSFILE_GO);
+    }
+    ("genérico", JENKINSFILE_GENERIC)
 }
 
 fn ensure_installed(cfg: &Config) -> Result<()> {
@@ -679,5 +924,86 @@ mod tests {
         assert!(parse_github_repo("https://gitlab.com/owner/repo").is_err());
         assert!(parse_github_repo("owner/repo/extra").is_err());
         assert!(parse_github_repo("owner/re po").is_err());
+    }
+
+    fn temp_project(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "termux-cicd-test-{}-{label}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn detecta_repo_desde_remote_origin() {
+        let dir = temp_project("git");
+        util::run("git", &["-C", &dir.to_string_lossy(), "init", "-q"]).unwrap();
+        util::run(
+            "git",
+            &[
+                "-C",
+                &dir.to_string_lossy(),
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:dueno/proyecto.git",
+            ],
+        )
+        .unwrap();
+
+        let project = detect_project(&dir, None).unwrap();
+        assert_eq!(project.owner, "dueno");
+        assert_eq!(project.name, "proyecto");
+        assert_eq!(project.root.as_deref(), Some(dir.as_path()));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sin_remoto_falla_con_mensaje_util() {
+        let dir = temp_project("sinremoto");
+        util::run("git", &["-C", &dir.to_string_lossy(), "init", "-q"]).unwrap();
+        let err = detect_project(&dir, None).unwrap_err().to_string();
+        assert!(err.contains("remoto `origin`"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn detecta_stack_y_genera_jenkinsfile() {
+        let dir = temp_project("rust");
+        fs::write(dir.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+
+        let (stack, content) = jenkinsfile_for(&dir);
+        assert_eq!(stack, "Rust");
+        assert!(content.contains("cargo test"));
+
+        assert!(maybe_write_jenkinsfile(&dir, false).unwrap());
+        assert!(dir.join("Jenkinsfile").exists());
+        assert!(!maybe_write_jenkinsfile(&dir, false).unwrap());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn detecta_stacks_habituales() {
+        let cases = [
+            ("Cargo.toml", "Rust"),
+            ("package.json", "Node.js"),
+            ("requirements.txt", "Python"),
+            ("pom.xml", "Maven"),
+            ("build.gradle", "Gradle"),
+            ("go.mod", "Go"),
+        ];
+        for (file, expected) in cases {
+            let dir = temp_project("stack");
+            fs::write(dir.join(file), "").unwrap();
+            assert_eq!(jenkinsfile_for(&dir).0, expected, "archivo {file}");
+            fs::remove_dir_all(&dir).ok();
+        }
     }
 }
