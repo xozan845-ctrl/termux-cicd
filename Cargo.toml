@@ -1,0 +1,17 @@
+[package]
+name = "termux-cicd"
+version = "0.1.0"
+edition = "2021"
+description = "Convierte Termux (Android) en un servidor CI/CD con Jenkins de forma automatizada"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive", "env"] }
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+
+[profile.release]
+strip = true
+opt-level = "s"
