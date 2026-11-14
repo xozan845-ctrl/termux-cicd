@@ -102,6 +102,21 @@ pub enum Command {
         #[arg(long)]
         push: bool,
     },
+    /// Convierte workflows de .github/workflows en un Jenkinsfile
+    Migrate {
+        /// Directorio del proyecto (por defecto, el actual)
+        #[arg(long, value_name = "DIR", default_value = ".")]
+        dir: PathBuf,
+        /// Archivo de salida (por defecto Jenkinsfile)
+        #[arg(long, value_name = "ARCHIVO")]
+        output: Option<PathBuf>,
+        /// Sobrescribe el Jenkinsfile si ya existe
+        #[arg(long)]
+        force: bool,
+        /// Muestra el resultado sin escribir nada
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Muestra o cambia la configuración
     Config {
         #[command(subcommand)]

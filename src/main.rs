@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod doctor;
 mod jenkins;
+mod migrate;
 mod service;
 mod termux;
 mod util;
@@ -74,6 +75,12 @@ fn run() -> anyhow::Result<()> {
             poll_minutes,
             push,
         ),
+        Command::Migrate {
+            dir,
+            output,
+            force,
+            dry_run,
+        } => migrate::run(&dir, output, force, dry_run),
         Command::Config { action } => commands::config(&mut cfg, action),
     }
 }

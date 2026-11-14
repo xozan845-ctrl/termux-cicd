@@ -108,9 +108,7 @@ pub fn run(cfg: &Config) -> Result<()> {
         termux::app_installed("com.termux.boot"),
         "necesario para arrancar Jenkins al encender el móvil",
     );
-    println!(
-        "  ℹ Batería: revisa Ajustes de Android → Batería → Termux → Sin restricciones"
-    );
+    println!("  ℹ Batería: revisa Ajustes de Android → Batería → Termux → Sin restricciones");
 
     println!();
     if failures == 0 {

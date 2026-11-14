@@ -62,11 +62,7 @@ pub fn quiet(program: &str, args: &[&str]) -> Result<String> {
     let out = output(program, args)?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        bail!(
-            "`{program} {}` falló: {}",
-            args.join(" "),
-            err.trim()
-        );
+        bail!("`{program} {}` falló: {}", args.join(" "), err.trim());
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
@@ -86,7 +82,10 @@ pub fn run_tolerant(program: &str, args: &[&str], allowed_codes: &[i32]) -> Resu
         }
         return Ok(());
     }
-    bail!("`{program} {}` falló (código {code}): {err}", args.join(" "));
+    bail!(
+        "`{program} {}` falló (código {code}): {err}",
+        args.join(" ")
+    );
 }
 
 /// Ejecuta un comando pasando `input` por stdin.

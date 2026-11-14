@@ -1,6 +1,7 @@
 use crate::cli::{ConfigAction, GithubAction};
 use crate::config::{self, Config};
 use crate::jenkins::{self, PLUGINS};
+use crate::migrate;
 use crate::service;
 use crate::termux;
 use crate::util;
@@ -47,8 +48,7 @@ pub fn install(cfg: &mut Config, version: Option<String>, force_plugins: bool) -
     step(3, 8, "Preparando directorios");
     let p = cfg.paths();
     for dir in [&p.root, &p.home(), &p.plugins(), &p.init_dir(), &p.logs()] {
-        fs::create_dir_all(dir)
-            .with_context(|| format!("no se pudo crear {}", dir.display()))?;
+        fs::create_dir_all(dir).with_context(|| format!("no se pudo crear {}", dir.display()))?;
     }
     println!("  {}", p.root.display());
 
@@ -145,7 +145,14 @@ pub fn status(cfg: &Config) -> Result<()> {
 
     let st = service::status();
     let version = jenkins::installed_version(&p).unwrap_or_else(|| "desconocida".into());
-    println!("Jenkins {}", if st.running { "EN EJECUCIÓN" } else { "DETENIDO" });
+    println!(
+        "Jenkins {}",
+        if st.running {
+            "EN EJECUCIÓN"
+        } else {
+            "DETENIDO"
+        }
+    );
     if let Some(pid) = st.pid {
         println!("  PID:          {pid}");
     }
@@ -157,8 +164,14 @@ pub fn status(cfg: &Config) -> Result<()> {
         jenkins::http_code(cfg.port, "/login").unwrap_or_else(|| "sin respuesta".into())
     );
     println!("  JENKINS_HOME: {}", p.home().display());
-    println!("  Datos:        {}", util::human_size(util::dir_size(&p.home())));
-    println!("  Admin:        admin (contraseña en {})", p.password().display());
+    println!(
+        "  Datos:        {}",
+        util::human_size(util::dir_size(&p.home()))
+    );
+    println!(
+        "  Admin:        admin (contraseña en {})",
+        p.password().display()
+    );
     if !st.running {
         println!("\nArranca con: termux-cicd start");
     }
@@ -248,7 +261,9 @@ pub fn backup(cfg: &Config, output: Option<PathBuf>) -> Result<()> {
         println!("Deteniendo Jenkins para una copia consistente...");
         service::stop()?;
         if !service::wait_stopped(Duration::from_secs(30)) {
-            println!("  Aviso: Jenkins sigue deteniéndose; la copia puede incluir archivos en cambio.");
+            println!(
+                "  Aviso: Jenkins sigue deteniéndose; la copia puede incluir archivos en cambio."
+            );
         }
         sleep(Duration::from_millis(800));
     }
@@ -398,9 +413,7 @@ pub fn config(cfg: &mut Config, action: ConfigAction) -> Result<()> {
                     println!("Configuración aplicada.");
                 }
             } else {
-                println!(
-                    "Configuración guardada. Se aplicará al ejecutar `termux-cicd install`."
-                );
+                println!("Configuración guardada. Se aplicará al ejecutar `termux-cicd install`.");
             }
             Ok(())
         }
@@ -446,7 +459,8 @@ pub fn setup(
     )
 }
 
-pub fn github(cfg: &Config, action: GithubAction) -> Result<()> {    match action {
+pub fn github(cfg: &Config, action: GithubAction) -> Result<()> {
+    match action {
         GithubAction::List => github_list(cfg),
         GithubAction::Add {
             repo,
@@ -556,9 +570,15 @@ fn github_add(
         .replace("{{JOB_NAME}}", &jenkins::groovy_escape(&job_name))
         .replace("{{OWNER}}", &jenkins::groovy_escape(&owner))
         .replace("{{REPO}}", &jenkins::groovy_escape(&repo_name))
-        .replace("{{CREDENTIALS_ID}}", &jenkins::groovy_escape(&credential_id))
+        .replace(
+            "{{CREDENTIALS_ID}}",
+            &jenkins::groovy_escape(&credential_id),
+        )
         .replace("{{USER}}", &jenkins::groovy_escape(user))
-        .replace("{{TOKEN}}", &jenkins::groovy_escape(token.as_deref().unwrap_or("")))
+        .replace(
+            "{{TOKEN}}",
+            &jenkins::groovy_escape(token.as_deref().unwrap_or("")),
+        )
         .replace("{{TRIGGER}}", &jenkins::groovy_escape(&trigger))
         .replace("{{SCAN}}", if scan { "true" } else { "false" });
 
@@ -581,7 +601,6 @@ fn github_add(
     );
     Ok(())
 }
-
 
 fn github_list(cfg: &Config) -> Result<()> {
     ensure_installed(cfg)?;
@@ -606,7 +625,9 @@ pub fn parse_github_repo(input: &str) -> Result<(String, String)> {
         .or_else(|| text.strip_prefix("http://github.com/"))
     {
         text = rest;
-    } else if text.starts_with("https://") || text.starts_with("http://") || text.starts_with("git@")
+    } else if text.starts_with("https://")
+        || text.starts_with("http://")
+        || text.starts_with("git@")
     {
         bail!("solo se admiten repositorios de github.com: {input}");
     }
@@ -721,10 +742,13 @@ fn detect_project(dir: &std::path::Path, repo: Option<&str>) -> Result<ProjectIn
         std::env::current_dir()?.join(dir)
     };
 
-    let root = util::quiet("git", &["-C", &dir.to_string_lossy(), "rev-parse", "--show-toplevel"])
-        .ok()
-        .map(|value| PathBuf::from(value.trim()))
-        .filter(|path| path.is_dir());
+    let root = util::quiet(
+        "git",
+        &["-C", &dir.to_string_lossy(), "rev-parse", "--show-toplevel"],
+    )
+    .ok()
+    .map(|value| PathBuf::from(value.trim()))
+    .filter(|path| path.is_dir());
 
     let remote = root.as_ref().and_then(|root| {
         util::quiet(
@@ -759,9 +783,43 @@ fn maybe_write_jenkinsfile(root: &std::path::Path, push: bool) -> Result<bool> {
         return Ok(false);
     }
 
-    let (stack, content) = jenkinsfile_for(root);
+    let (label, content) = match migrate::generate(root) {
+        Ok(Some(generated)) if generated.usable() => {
+            for warning in &generated.warnings {
+                println!("  Aviso de migración: {warning}");
+            }
+            (
+                format!(
+                    "migrado de .github/workflows ({})",
+                    generated.workflows.join(", ")
+                ),
+                generated.content,
+            )
+        }
+        Ok(Some(generated)) => {
+            for warning in &generated.warnings {
+                println!("  Aviso de migración: {warning}");
+            }
+            println!(
+                "  No hay pasos de GitHub Actions convertibles; se usa la plantilla por stack."
+            );
+            let (stack, content) = jenkinsfile_for(root);
+            (stack.to_string(), content.to_string())
+        }
+        Ok(None) => {
+            let (stack, content) = jenkinsfile_for(root);
+            (stack.to_string(), content.to_string())
+        }
+        Err(err) => {
+            println!("  Aviso: no se pudieron migrar los workflows: {err:#}");
+            println!("  Se usa la plantilla por stack.");
+            let (stack, content) = jenkinsfile_for(root);
+            (stack.to_string(), content.to_string())
+        }
+    };
+
     fs::write(&path, content).with_context(|| format!("no se pudo crear {}", path.display()))?;
-    println!("  Jenkinsfile: {stack} → {}", path.display());
+    println!("  Jenkinsfile: {label} → {}", path.display());
 
     if push {
         let root_s = root.to_string_lossy().to_string();
@@ -1008,5 +1066,54 @@ mod tests {
             assert_eq!(jenkinsfile_for(&dir).0, expected, "archivo {file}");
             fs::remove_dir_all(&dir).ok();
         }
+    }
+
+    #[test]
+    fn prefiere_migrar_workflows_sobre_la_plantilla() {
+        let dir = temp_project("migrate");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let workflows = dir.join(".github").join("workflows");
+        fs::create_dir_all(&workflows).unwrap();
+        fs::write(
+            workflows.join("ci.yml"),
+            "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hola\n",
+        )
+        .unwrap();
+
+        assert!(maybe_write_jenkinsfile(&dir, false).unwrap());
+        let content = fs::read_to_string(dir.join("Jenkinsfile")).unwrap();
+        assert!(content.contains("stage('build')"));
+        assert!(content.contains("echo hola"));
+        assert!(content.contains("Jenkinsfile generado por `termux-cicd migrate`"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cae_en_la_plantilla_si_no_hay_pasos_soportados() {
+        let dir = temp_project("fallback");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let workflows = dir.join(".github").join("workflows");
+        fs::create_dir_all(&workflows).unwrap();
+        fs::write(
+            workflows.join("ci.yml"),
+            "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/setup-node@v4\n",
+        )
+        .unwrap();
+
+        assert!(maybe_write_jenkinsfile(&dir, false).unwrap());
+        let content = fs::read_to_string(dir.join("Jenkinsfile")).unwrap();
+        assert!(content.contains("cargo test"));
+        assert!(!content.contains("termux-cicd migrate"));
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

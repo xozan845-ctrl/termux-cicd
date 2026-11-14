@@ -268,7 +268,10 @@ pub fn run_groovy(cfg: &Config, script: &str) -> Result<()> {
         .trim()
         .to_string();
     if password.is_empty() {
-        bail!("la contraseña de admin está vacía en {}", p.password().display());
+        bail!(
+            "la contraseña de admin está vacía en {}",
+            p.password().display()
+        );
     }
 
     let auth_file = p.root.join(".cli-auth.tmp");
@@ -278,7 +281,16 @@ pub fn run_groovy(cfg: &Config, script: &str) -> Result<()> {
     let auth_arg = format!("@{}", auth_file.to_string_lossy());
     let result = util::run_with_stdin(
         "java",
-        &["-jar", &jar.to_string_lossy(), "-s", &url, "-auth", &auth_arg, "groovy", "="],
+        &[
+            "-jar",
+            &jar.to_string_lossy(),
+            "-s",
+            &url,
+            "-auth",
+            &auth_arg,
+            "groovy",
+            "=",
+        ],
         script,
     );
     let _ = fs::remove_file(&auth_file);

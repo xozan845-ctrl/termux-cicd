@@ -57,8 +57,7 @@ impl Config {
             fs::create_dir_all(parent)?;
         }
         let raw = toml::to_string_pretty(self)?;
-        fs::write(&path, raw)
-            .with_context(|| format!("no se pudo guardar {}", path.display()))
+        fs::write(&path, raw).with_context(|| format!("no se pudo guardar {}", path.display()))
     }
 
     pub fn paths(&self) -> Paths {

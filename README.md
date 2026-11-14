@@ -30,6 +30,7 @@ comando.
 - [Cómo funciona por dentro](#cómo-funciona-por-dentro)
 - [Configuración](#configuración)
 - [Integración con GitHub](#integración-con-github)
+- [Migración desde GitHub Actions](#migración-desde-github-actions)
 - [Estructura en disco](#estructura-en-disco)
 - [Seguridad](#seguridad)
 - [Acceso remoto](#acceso-remoto)
@@ -89,6 +90,8 @@ que falta.
 - Configuración persistentes en TOML.
 - Integración GitHub: credencial, Multibranch Pipeline, escaneo periódico y
   generación automática de `Jenkinsfile` según el stack.
+- Conversión de workflows de `.github/workflows` a `Jenkinsfile` con
+  `migrate`, conservando pasos, dependencias, variables y artefactos.
 - Comando `setup` que hace todo en un paso dentro de un proyecto.
 
 ---
@@ -122,6 +125,7 @@ que falta.
 |---|---|
 | `src/cli.rs` | Definición de comandos y opciones con `clap`. |
 | `src/commands.rs` | Instalación, ciclo de vida, backup, GitHub y `setup`. |
+| `src/migrate.rs` | Conversión de GitHub Actions a `Jenkinsfile`. |
 | `src/jenkins.rs` | Versiones, WAR, plugins, init Groovy, CLI y readiness. |
 | `src/service.rs` | Servicio `runit`, log y arranque con Termux:Boot. |
 | `src/termux.rs` | Paquetes, IP LAN, memoria, disco y apps Android. |
@@ -160,7 +164,7 @@ El binario es autosuficiente: las plantillas se compilan dentro de él con
 ```sh
 pkg update
 pkg install rust git curl tar
-git clone https://github.com/xozan845-ctrl/termux-cicd.git
+git clone https://github.com/tu-usuario/termux-cicd.git
 cd termux-cicd
 cargo build --release
 install -m755 target/release/termux-cicd "$PREFIX/bin/termux-cicd"
@@ -219,9 +223,19 @@ termux-cicd setup
 ```
 
 `setup` instala Jenkins si hace falta, deduce el repo del remoto, busca el
-token, configura el job y genera un `Jenkinsfile` para tu stack.
+token, configura el job y genera un `Jenkinsfile` para tu stack. Si hay
+`.github/workflows`, intenta migrarlos primero.
 
-### Caso 3: solo configurar GitHub
+### Caso 3: ya tengo GitHub Actions
+
+```sh
+cd mi-proyecto
+termux-cicd migrate --dry-run   # ver el resultado sin escribir
+termux-cicd migrate             # crear Jenkinsfile
+termux-cicd setup               # conectar el repo a Jenkins
+```
+
+### Caso 4: solo configurar GitHub
 
 ```sh
 cd mi-proyecto
@@ -229,7 +243,7 @@ termux-cicd github add
 termux-cicd github list
 ```
 
-### Caso 4: acceso remoto
+### Caso 5: acceso remoto
 
 1. Instala la app oficial de **Tailscale** en el móvil y en tu portátil.
 2. Inicia sesión en la misma tailnet.
@@ -424,6 +438,29 @@ termux-cicd setup usuario/repo --name mi-job --poll-minutes 10
 Equivale a `install` (si hace falta) + `github add` con valores automáticos.
 Es la vía recomendada para un proyecto nuevo.
 
+### `migrate`
+
+```sh
+termux-cicd migrate
+termux-cicd migrate --dry-run
+termux-cicd migrate --output Jenkinsfile.ci --force
+termux-cicd migrate --dir ~/proyecto
+```
+
+Convierte `.github/workflows/*.yml` y `*.yaml` en un `Jenkinsfile`
+Declarative Pipeline. Si no hay workflows, falla y no escribe nada.
+
+| Opción | Efecto |
+|---|---|
+| `--dir DIR` | Proyecto a convertir. Por defecto, el directorio actual. |
+| `--output ARCHIVO` | Destino. Por defecto, `DIR/Jenkinsfile`. |
+| `--force` | Sobrescribe el archivo de salida si ya existe. |
+| `--dry-run` | Muestra el resultado por stdout y no escribe nada. |
+
+El comando imprime los avisos de migración y deja comentarios `TODO` dentro
+del `Jenkinsfile` para todo lo que no tiene equivalente automático. Ver
+[Migración desde GitHub Actions](#migración-desde-github-actions).
+
 ---
 
 ## Cómo funciona por dentro
@@ -567,7 +604,7 @@ Variables de entorno relevantes:
 El job de Jenkins **no conoce tu directorio local**, ni tu rama de trabajo, ni
 tus cambios sin subir. Solo se configura con:
 
-- `owner` y `repo` (por ejemplo `xozan845-ctrl/termux-cicd`).
+- `owner` y `repo` (por ejemplo `usuario/termux-cicd`).
 - Una credencial de GitHub, si el repo es privado.
 - La ruta del `Jenkinsfile` dentro del repo (`Jenkinsfile`).
 - El intervalo de polling.
@@ -697,8 +734,10 @@ reciba eventos de GitHub.
 
 ### 6. Jenkinsfile automático
 
-Si el proyecto local no tiene `Jenkinsfile` y no usas `--no-jenkinsfile`, se
-genera según el primer archivo detectado:
+Si el proyecto local no tiene `Jenkinsfile`, `github add` y `setup` intentan
+primero **migrar los workflows de GitHub Actions**. Si no hay
+`.github/workflows` o ningún paso es convertible, se genera una plantilla
+según el primer archivo detectado:
 
 | Archivo | Stack | Stages |
 |---|---|---|
@@ -709,6 +748,11 @@ genera según el primer archivo detectado:
 | `build.gradle`, `build.gradle.kts` | Gradle | `./gradlew build` o `gradle build` |
 | `go.mod` | Go | `go test ./...`, `go build ./...` |
 | ninguno | Genérico | inspección del repo |
+
+La prioridad es:
+
+1. `migrate` de `.github/workflows` si hay pasos convertibles.
+2. Plantilla por stack si no hay workflows o no se pudo convertir nada.
 
 Todos los pipelines incluyen:
 
@@ -727,7 +771,7 @@ Muestra:
 
 ```
 JOB             REPO                          RAMAS  ULTIMO SCAN
-termux-cicd     xozan845-ctrl/termux-cicd     1      SUCCESS
+termux-cicd     usuario/termux-cicd           1      SUCCESS
 ```
 
 Solo lista `WorkflowMultiBranchProject`, no pipelines simples.
@@ -739,6 +783,133 @@ Solo lista `WorkflowMultiBranchProject`, no pipelines simples.
   indexación indica `'Jenkinsfile' not found`.
 - Si el repo es privado y el token no sirve, el escaneo falla con error de
   autenticación.
+
+---
+
+## Migración desde GitHub Actions
+
+Jenkins **no lee** `.github/workflows`. Si un proyecto ya tiene CI en GitHub
+Actions, `termux-cicd migrate` genera un `Jenkinsfile` a partir de esos YAML.
+
+### Por qué un conversor propio
+
+Antes de implementarlo se revisaron las alternativas open source disponibles:
+
+| Herramienta | Dirección | Limitación |
+|---|---|---|
+| `gh actions-importer` (GitHub) | Jenkins/Azure/GitLab → **GitHub Actions** | Va en sentido contrario. |
+| `Huckcity/jenkins-to-actions` | **Jenkinsfile → GitHub Actions** | También en sentido contrario. |
+| `bk pipeline convert` (Buildkite) | GitHub Actions → **Buildkite** | No genera Jenkins. |
+| Conversor web de infrafolks | GitHub Actions → Jenkinsfile | Solo estructural; las acciones del Marketplace requieren reemplazo manual. No es un CLI instalable ni mantenible. |
+
+No existe una herramienta open source madura y mantenida que convierta
+GitHub Actions a `Jenkinsfile`. Por eso el proyecto incluye un conversor
+**conservador**: traduce lo que tiene equivalencia clara y marca con `TODO`
+todo lo que necesita decisión humana. No inventa pasos ni oculta diferencias.
+
+### Qué se convierte
+
+| GitHub Actions | Jenkinsfile |
+|---|---|
+| `jobs` | `stage(...)` |
+| `needs` | Orden de los stages (topológico). |
+| `run` | `sh '''...'''` |
+| `env` de workflow y job | `environment { ... }` |
+| `env` de paso | `withEnv([...])` |
+| `working-directory` | `dir('...') { ... }` |
+| `actions/checkout` | Se omite: Jenkins hace el checkout del SCM. |
+| `actions/upload-artifact` | `archiveArtifacts artifacts: '...'` |
+| `timeout-minutes` de job | `options { timeout(...) }` |
+| `${{ secrets.X }}` | `X = credentials('X')` + `${X}` en el script |
+| `${{ github.sha }}` | `${GIT_COMMIT}` |
+| `${{ github.ref_name }}` | `${BRANCH_NAME}` |
+| `${{ github.workspace }}` | `${WORKSPACE}` |
+| `${{ runner.os }}` | `Linux` |
+| `${{ env.X }}` | `${X}` |
+| Varios workflows | Stages con prefijo `<workflow> / <job>`. |
+| Scripts multilínea y heredocs | Se conservan literalmente. |
+
+El resultado incluye `timestamps()`, `disableConcurrentBuilds()`, retención de
+10 builds y `cleanWs()`, igual que las plantillas por stack.
+
+### Qué queda en `TODO`
+
+- `actions/setup-node`, `setup-python`, `setup-java`, `setup-go`, etc.: el
+  toolchain debe existir en Termux.
+- Acciones del Marketplace sin equivalente: Docker, caché, releases,
+  `github-script`, despliegues, etc.
+- `actions/download-artifact`: requiere el plugin Copy Artifact u otra forma
+  de pasar artefactos entre jobs.
+- `strategy.matrix`: se genera una sola ejecución y se avisa.
+- `if:`: no se traduce la sintaxis de expresiones de GitHub; el paso se
+  ejecuta siempre y se marca con `TODO`.
+- `shell: pwsh` o `cmd`: el script se deja comentado.
+- `continue-on-error`, `timeout-minutes` por paso, `services`, `container`,
+  `permissions`, `concurrency` y workflows reutilizables.
+- Triggers `on:`: el job usa polling de termux-cicd.
+
+### Ejemplo
+
+```sh
+cd mi-proyecto
+termux-cicd migrate --dry-run     # revisar sin escribir
+termux-cicd migrate               # crea Jenkinsfile
+```
+
+Salida resumida:
+
+```
+Workflows encontrados: ci.yml
+
+Avisos de migración (6):
+  - Los triggers `on:` de GitHub Actions no se migran...
+  - `actions/setup-node@v4` no tiene equivalente automático...
+  - secreto `NPM_TOKEN` mapeado a la credencial `NPM_TOKEN`...
+
+Jenkinsfile escrito en /home/.../Jenkinsfile (2 stages migrados).
+Revisa los TODO y los avisos antes de hacer commit y push.
+```
+
+Fragmento generado:
+
+```groovy
+stage('test') {
+    environment {
+        CARGO_TERM_COLOR = 'always'
+    }
+    steps {
+        // actions/checkout: el checkout lo hace Jenkins desde el SCM
+        // TODO: reemplazar actions/setup-node@v4 (instala el toolchain...)
+        sh '''
+npm ci
+        '''
+        dir('web') {
+            sh '''
+npm test
+            '''
+        }
+        archiveArtifacts artifacts: 'web/coverage/**', allowEmptyArchive: true
+    }
+}
+```
+
+### Límites y validación
+
+- El conversor **no garantiza equivalencia funcional**. GitHub Actions y
+  Jenkins tienen modelos distintos de runners, permisos, caché y secretos.
+- Los secretos se convierten en referencias a credenciales de Jenkins. El
+  valor del token **nunca** se escribe en el `Jenkinsfile`; hay que crear cada
+  credencial (tipo *Secret text*) con el mismo ID.
+- Los scripts se emiten sin sangría dentro de `sh '''...'''` para no romper
+  heredocs.
+- El resultado se valida con el endpoint
+  `pipeline-model-converter/validate` de Jenkins en las pruebas del proyecto.
+- Después de migrar: revisa los `TODO`, ejecuta el pipeline, ajusta rutas y
+  toolchains, y solo entonces haz `git push`.
+
+Si `github add` o `setup` encuentran workflows pero no logran convertir
+ningún paso, avisan y usan la plantilla por stack en lugar de dejar un
+`Jenkinsfile` vacío.
 
 ---
 
@@ -862,13 +1033,25 @@ Cubren:
 - Detección de stack y generación de `Jenkinsfile`.
 - Detección de Rust, Node, Python, Maven, Gradle y Go.
 - Generación de contraseñas y formato de tamaños.
+- Migración de workflows:
+  - `run` → `sh` y omisión de `actions/checkout`.
+  - Orden de jobs según `needs`.
+  - `env` de workflow/job y `working-directory`.
+  - `upload-artifact` → `archiveArtifacts`.
+  - Avisos de `setup-*`, matrices y expresiones no portables.
+  - Secretos → credenciales de Jenkins.
+  - Escape de comillas, barras invertidas y `'''`.
+  - Varios workflows con prefijo de stage.
+  - Detección de workflows sin pasos soportados.
+  - Prioridad de `.github/workflows` sobre la plantilla por stack y fallback.
+  - Secretos en `env` que generan credenciales sin comillas extra.
 
 Salida esperada:
 
 ```
-running 9 tests
+running 23 tests
 ...
-test result: ok. 9 passed; 0 failed
+test result: ok. 23 passed; 0 failed
 ```
 
 ### Compilación de release
@@ -878,7 +1061,7 @@ cargo build --release
 ls -lh target/release/termux-cicd
 ```
 
-El binario ronda 1.3 MB y no depende de archivos externos.
+El binario ronda 1.6 MB y no depende de archivos externos.
 
 ### Checklist manual en el móvil
 
@@ -898,6 +1081,8 @@ Ejecuta en orden y comprueba el resultado:
 | T10 | `termux-cicd status \| head -3` | Sin panic; código 141 aceptable |
 | T11 | `termux-cicd config show` | TOML con los valores actuales |
 | T12 | `termux-cicd config set executors 2` | Aplica y reinicia si estaba activo |
+| T13 | `termux-cicd migrate --dry-run` en un proyecto con `.github/workflows` | Muestra el `Jenkinsfile` sin escribir |
+| T14 | `termux-cicd migrate` dos veces | La segunda falla y pide `--force` |
 
 ### Prueba de instalación desde cero
 
@@ -976,6 +1161,60 @@ Resultado esperado:
 - Detecta `jenkins-docs/simple-java-maven-app`.
 - Genera un `Jenkinsfile` con `mvn`.
 - Crea el job y lanza el escaneo.
+
+### Prueba de migración de GitHub Actions
+
+```sh
+mkdir -p ~/tmp/proyecto-gha/.github/workflows && cd ~/tmp/proyecto-gha
+cat > .github/workflows/ci.yml <<'EOF'
+name: CI
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm test
+        working-directory: web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cobertura
+          path: web/coverage/**
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "token ${{ secrets.NPM_TOKEN }}"
+EOF
+
+termux-cicd migrate --dry-run > ~/tmp/jenkinsfile.preview
+grep -q "stage('test')" ~/tmp/jenkinsfile.preview && echo "dry-run OK"
+
+termux-cicd migrate
+grep -q "archiveArtifacts" Jenkinsfile && echo "artefactos OK"
+grep -q "NPM_TOKEN = credentials('NPM_TOKEN')" Jenkinsfile && echo "secretos OK"
+grep -q "dir('web')" Jenkinsfile && echo "working-directory OK"
+
+# La segunda ejecución no debe sobrescribir sin --force
+termux-cicd migrate; echo "código esperado 1: $?"
+```
+
+Validación real con Jenkins:
+
+```sh
+PW=$(cat ~/jenkins/home/admin-password.txt)
+CRUMB=$(curl -s -u "admin:$PW" http://127.0.0.1:8080/crumbIssuer/api/json \
+  | sed -n 's/.*"crumb":"\([^"]*\)".*/\1/p')
+curl -s -u "admin:$PW" -H "Jenkins-Crumb: $CRUMB" \
+  --data-urlencode "jenkinsfile@Jenkinsfile" \
+  http://127.0.0.1:8080/pipeline-model-converter/validate
+rm -rf ~/tmp/proyecto-gha ~/tmp/jenkinsfile.preview
+```
+
+Resultado esperado: `Jenkinsfile successfully validated.` y los cuatro `OK`.
 
 ### Limpieza de jobs y credenciales de prueba
 
@@ -1150,6 +1389,9 @@ Los backups y `JENKINS_HOME` son los que más ocupan. Revisa también
   de Termux, con acceso a `$HOME`.
 - **Sin gestor de toolchains.** No instala Node, Python, Go, etc.; solo
   Jenkins. Los `Jenkinsfile` asumen que esas herramientas existen.
+- **Migración conservadora.** `migrate` traduce solo lo que tiene equivalencia
+  clara. Las acciones del Marketplace, matrices y expresiones de GitHub
+  quedan marcadas con `TODO`; la equivalencia funcional no está garantizada.
 - **Sin CI de GitHub Actions en este repo.** Las pruebas requieren Termux/
   Android y se ejecutan localmente.
 - **Sin soporte oficial de otras plataformas.** El código asume Termux,
@@ -1164,6 +1406,7 @@ Los backups y `JENKINS_HOME` son los que más ocupan. Revisa también
 - [x] Comando `github` con credenciales y Multibranch Pipeline.
 - [x] Detección automática de repo, token y stack.
 - [x] Generación de `Jenkinsfile` por stack.
+- [x] Migración de `.github/workflows` a `Jenkinsfile` (`migrate`).
 - [ ] Perfiles de plugins por stack (Node, Python, Rust, Go...).
 - [ ] Instalación de toolchains de build (`nodejs`, `python`, `golang`).
 - [ ] `doctor --fix`.
